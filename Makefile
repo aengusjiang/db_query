@@ -30,7 +30,8 @@ install-frontend: ## Install frontend dependencies
 	cd $(FRONTEND_DIR) && $(NPM) install
 
 # Development servers
-dev: dev-backend dev-frontend ## Start both backend and frontend (in parallel)
+dev: ## Start both backend and frontend (in parallel; Ctrl-C stops both)
+	$(MAKE) -j2 dev-backend dev-frontend
 
 dev-backend: ## Start backend development server
 	@echo "$(BLUE)Starting backend server on http://localhost:8000$(NC)"
