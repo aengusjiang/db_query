@@ -256,11 +256,11 @@ class ExportRequest(BaseModel):
 | 连接凭据泄漏 | 导出内容仅含查询结果；连接 URL 不进入响应体与文件 |
 | 巨型结果拖垮内存 | 自动 LIMIT 1000 上限（查询管线内置） |
 
-### 4.6 AI Agent 任务分解（作业核心练习点）
+### 4.6 需求分解与自动化映射
 
-导出任务的 Agent 分解与实现层映射：
+导出需求按执行阶段分解为三个子任务，每个子任务映射到确定的实现层：
 
-| 步骤 | Agent 子任务 | 实现层 |
+| 步骤 | 子任务 | 实现层 |
 |---|---|---|
 | 1. 获取查询结果 | 前置检查（后端存活、连接存在）→ 调导出 API | `curl POST /export`（命令第 0/1 步） |
 | 2. 格式化数据 | 状态码分诊（404/400/422/500）→ 内容校验（BOM 字节、jq 可解析、X-Row-Count 截断判断） | 命令第 2 步 |
@@ -275,10 +275,10 @@ class ExportRequest(BaseModel):
 | `backend/app/models/schemas.py` | 改 | 新增 `ExportRequest` DTO |
 | `backend/app/services/exporter.py` | 新 | 纯函数：`result_to_csv` / `result_to_json` / `sanitize_filename` / `build_export_filename` |
 | `backend/app/api/v1/queries.py` | 改 | `POST /{name}/export` 端点 + `_get_connection_or_404` 抽取 |
-| `backend/tests/unit/test_api_exports.py` | 新 | 17 用例（端点 12 + 纯函数 5） |
+| `backend/tests/unit/test_api_exports.py` | 新 | 18 用例（端点 12 + 纯函数 6） |
 | `backend/tests/unit/test_api_queries.py` | 改 | 修复 6 处过时 mock/断言（存量 4 ERROR 清零） |
 | `frontend/src/utils/export.ts` | 新 | `toCsv` / `toJson` / `buildExportFilename` / `downloadBlob` |
-| `frontend/src/utils/export.test.ts` | 新 | 13 用例（首个前端单测） |
+| `frontend/src/utils/export.test.ts` | 新 | 15 用例（首个前端单测） |
 | `frontend/src/pages/Home.tsx` | 改 | 删重复类型与内联导出（~80 行），接 utils，新增主动询问 |
 | `frontend/package.json` | 改 | `test` 改 `vitest run`（make test 不再挂起），新增 `test:watch` |
 | `.claude/commands/export-query.md` | 新 | AI 一键导出命令 |
@@ -287,7 +287,7 @@ class ExportRequest(BaseModel):
 
 ---
 
-## 五、AI 工具链实践（作业核心练习点）
+## 五、AI 工具链集成
 
 ### 5.1 Claude Code 自定义命令
 
@@ -322,20 +322,20 @@ class ExportRequest(BaseModel):
 ```
         ╱  E2E（手测清单，见 6.3）  ╲        ← 双库 × 双格式 × 浏览器下载
        ╱  API 集成（TestClient）     ╲      ← test_api_exports.py 端点 12 用例
-      ╱  单元（纯函数）                ╲    ← exporter.py 5 用例 + export.ts 13 用例
+      ╱  单元（纯函数）                ╲    ← exporter.py 6 用例 + export.ts 15 用例
 ```
 
-### 6.2 用例矩阵（自动化部分，30 用例全绿）
+### 6.2 用例矩阵（自动化部分，33 用例全绿）
 
 | 层 | 覆盖 |
 |---|---|
-| 端点 | 成功 200（headers/attachment/X-Row-Count/BOM）、RFC4180 转义、公式注入、中文、JSON 无 BOM、空结果（CSV=header / JSON=[]）、404、400、500、422×2、六参管线断言、文件名规则 |
-| 后端纯函数 | BOM 前缀、`ensure_ascii=False`、白名单过滤、空回退、文件名格式 |
-| 前端纯函数 | 同构镜像：BOM、转义、注入防护（数值不受影响）、null→""、中文、JSON 序列化、空集、文件名 |
+| 端点 | 成功 200（headers/attachment/X-Row-Count/BOM）、RFC4180 转义、公式注入（含 header）、中文、JSON 无 BOM、空结果（CSV=header / JSON=[]）、404、400、500、422×2、六参管线断言、文件名规则 |
+| 后端纯函数 | BOM 前缀、header 公式防护、`ensure_ascii=False`、白名单过滤、空回退、文件名格式 |
+| 前端纯函数 | 同构镜像：BOM、转义（含 header）、注入防护（数值不受影响）、尾部 CRLF、null→""、中文、JSON 序列化、空集、文件名 |
 
 ### 6.3 验收标准（AC）
 
-- [x] AC-1: `make test` 后端 38 相关用例 + 前端 13 用例全绿；
+- [x] AC-1: `make test` 后端 39 相关用例 + 前端 15 用例全绿；
 - [x] AC-2: MySQL（interview-db）与 PG（sample-hr）双库 × csv/json 双格式 curl 实测 200，headers 齐全；
 - [x] AC-3: CSV 文件前 three bytes = `EF BB BF`，Excel 打开中文正常（乱码修复）；
 - [x] AC-4: `format:"xlsx"` → 422；`DELETE` → 400；未知连接 → 404；
