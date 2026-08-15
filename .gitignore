@@ -1,0 +1,6 @@
+# Claude Code export command output directory
+exports/
+
+# OS artifacts
+.DS_Store
+Thumbs.db
