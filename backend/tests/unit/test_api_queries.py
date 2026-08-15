@@ -1,27 +1,26 @@
 """Unit tests for query API endpoints."""
 
-import pytest
-from datetime import datetime, timezone
-from unittest.mock import AsyncMock, patch, MagicMock
-from fastapi.testclient import TestClient
-from sqlmodel import Session, SQLModel, create_engine, select
-from app.main import app
-from app.database import get_session
-from app.models.database import DatabaseConnection, ConnectionStatus
-from app.models.query import QueryHistory, QuerySource
-from app.models.metadata import DatabaseMetadata
-from app.models.schemas import QueryResult, QueryColumn
-from app.services.sql_validator import SqlValidationError
 import json
+from datetime import UTC, datetime
+from unittest.mock import patch
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlmodel import Session, SQLModel, create_engine
+
+from app.database import get_session
+from app.main import app
+from app.models.database import ConnectionStatus, DatabaseConnection, DatabaseType
+from app.models.metadata import DatabaseMetadata
+from app.models.query import QueryHistory, QuerySource
+from app.models.schemas import QueryColumn, QueryResult
+from app.services.sql_validator import SqlValidationError
 
 
 @pytest.fixture
 def test_session():
     """Create an in-memory SQLite session for testing."""
     # Import all models to ensure tables are created
-    from app.models.database import DatabaseConnection
-    from app.models.metadata import DatabaseMetadata
-    from app.models.query import QueryHistory
 
     # Use file::memory:?cache=shared to allow multiple connections to the same in-memory database
     engine = create_engine(
@@ -56,7 +55,7 @@ def sample_connection(test_session):
         url="postgresql://user:pass@localhost/testdb",
         description="Test database",
         status=ConnectionStatus.ACTIVE,
-        last_connected_at=datetime.now(timezone.utc).replace(tzinfo=None),
+        last_connected_at=datetime.now(UTC).replace(tzinfo=None),
     )
     test_session.add(conn)
     test_session.commit()
@@ -91,7 +90,7 @@ def sample_metadata(test_session):
     cached = DatabaseMetadata(
         database_name="test_db",
         metadata_json=json.dumps(metadata_dict),
-        fetched_at=datetime.now(timezone.utc).replace(tzinfo=None),
+        fetched_at=datetime.now(UTC).replace(tzinfo=None),
         table_count=1,
     )
     test_session.add(cached)
@@ -102,7 +101,7 @@ def sample_metadata(test_session):
 class TestExecuteSqlQuery:
     """Test SQL query execution endpoint."""
 
-    @patch("app.api.v1.queries.execute_query")
+    @patch("app.api.v1.queries.execute_query_with_service")
     def test_execute_sql_query_success(self, mock_execute, client, sample_connection):
         """Test successful SQL query execution."""
         # Mock query result
@@ -135,13 +134,15 @@ class TestExecuteSqlQuery:
         assert data["rows"][0]["name"] == "Alice"
         assert data["executionTimeMs"] == 25
 
-        # Verify execute_query was called with correct parameters
+        # Verify execute_query_with_service was called with correct parameters
         mock_execute.assert_called_once()
         call_args = mock_execute.call_args[0]  # Positional args
-        # Args: session, database_name, url, sql, query_source
+        # Args: session, database_name, db_type, url, sql, query_source
         assert call_args[1] == "test_db"  # database_name
-        assert call_args[3] == "SELECT * FROM users"  # sql
-        assert call_args[4] == QuerySource.MANUAL  # query_source
+        assert call_args[2] == DatabaseType.POSTGRESQL  # db_type (fixture default)
+        assert call_args[3] == "postgresql://user:pass@localhost/testdb"  # url
+        assert call_args[4] == "SELECT * FROM users"  # sql
+        assert call_args[5] == QuerySource.MANUAL  # query_source
 
     def test_execute_sql_query_database_not_found(self, client):
         """Test query execution when database doesn't exist."""
@@ -153,7 +154,7 @@ class TestExecuteSqlQuery:
         assert response.status_code == 404
         assert "not found" in response.json()["detail"]
 
-    @patch("app.api.v1.queries.execute_query")
+    @patch("app.api.v1.queries.execute_query_with_service")
     def test_execute_sql_query_validation_error(self, mock_execute, client, sample_connection):
         """Test query execution with SQL validation error."""
         # Mock validation error
@@ -167,7 +168,7 @@ class TestExecuteSqlQuery:
         assert response.status_code == 400
         assert "Only SELECT queries are allowed" in response.json()["detail"]
 
-    @patch("app.api.v1.queries.execute_query")
+    @patch("app.api.v1.queries.execute_query_with_service")
     def test_execute_sql_query_execution_error(self, mock_execute, client, sample_connection):
         """Test query execution with database error."""
         # Mock execution error
@@ -182,7 +183,7 @@ class TestExecuteSqlQuery:
         assert "Query execution failed" in response.json()["detail"]
         assert "Table does not exist" in response.json()["detail"]
 
-    @patch("app.api.v1.queries.execute_query")
+    @patch("app.api.v1.queries.execute_query_with_service")
     def test_execute_sql_query_empty_result(self, mock_execute, client, sample_connection):
         """Test query execution with empty result set."""
         # Mock empty result
@@ -225,7 +226,7 @@ class TestGetQueryHistory:
             history = QueryHistory(
                 database_name="test_db",
                 sql_text=f"SELECT {i} FROM users",
-                executed_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                executed_at=datetime.now(UTC).replace(tzinfo=None),
                 execution_time_ms=10 + i,
                 row_count=i * 10,
                 success=True,
@@ -253,7 +254,7 @@ class TestGetQueryHistory:
             history = QueryHistory(
                 database_name="test_db",
                 sql_text=f"SELECT {i}",
-                executed_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                executed_at=datetime.now(UTC).replace(tzinfo=None),
                 execution_time_ms=10,
                 row_count=10,
                 success=True,
@@ -292,7 +293,7 @@ class TestGetQueryHistory:
         success_history = QueryHistory(
             database_name="test_db",
             sql_text="SELECT * FROM users",
-            executed_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            executed_at=datetime.now(UTC).replace(tzinfo=None),
             execution_time_ms=20,
             row_count=10,
             success=True,
@@ -305,7 +306,7 @@ class TestGetQueryHistory:
         failed_history = QueryHistory(
             database_name="test_db",
             sql_text="SELECT * FROM invalid_table",
-            executed_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            executed_at=datetime.now(UTC).replace(tzinfo=None),
             execution_time_ms=5,
             row_count=None,
             success=False,
@@ -333,7 +334,9 @@ class TestNaturalLanguageToSql:
     """Test natural language to SQL conversion endpoint."""
 
     @patch("app.api.v1.queries.nl2sql_service.generate_sql")
-    def test_natural_language_to_sql(self, mock_generate, client, sample_connection, sample_metadata):
+    def test_natural_language_to_sql(
+        self, mock_generate, client, sample_connection, sample_metadata
+    ):
         """Test converting natural language to SQL."""
         # Mock SQL generation
         mock_generate.return_value = {
@@ -356,6 +359,7 @@ class TestNaturalLanguageToSql:
         mock_generate.assert_called_once_with(
             "Show me all users",
             sample_metadata,
+            DatabaseType.POSTGRESQL,  # db_type from sample_connection
         )
 
     def test_natural_language_to_sql_database_not_found(self, client):
@@ -380,7 +384,9 @@ class TestNaturalLanguageToSql:
         assert "refresh metadata" in response.json()["detail"]
 
     @patch("app.api.v1.queries.nl2sql_service.generate_sql")
-    def test_natural_language_to_sql_generation_error(self, mock_generate, client, sample_connection, sample_metadata):
+    def test_natural_language_to_sql_generation_error(
+        self, mock_generate, client, sample_connection, sample_metadata
+    ):
         """Test NL to SQL when generation fails."""
         # Mock generation error
         mock_generate.side_effect = Exception("OpenAI API error")
@@ -414,7 +420,9 @@ class TestNaturalLanguageToSql:
         assert response.status_code == 422
 
     @patch("app.api.v1.queries.nl2sql_service.generate_sql")
-    def test_natural_language_to_sql_chinese(self, mock_generate, client, sample_connection, sample_metadata):
+    def test_natural_language_to_sql_chinese(
+        self, mock_generate, client, sample_connection, sample_metadata
+    ):
         """Test NL to SQL with Chinese prompt."""
         # Mock SQL generation
         mock_generate.return_value = {
@@ -444,7 +452,7 @@ class TestQueryHistoryEntry:
         history = QueryHistory(
             database_name="test_db",
             sql_text="SELECT * FROM users",
-            executed_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            executed_at=datetime.now(UTC).replace(tzinfo=None),
             execution_time_ms=25,
             row_count=10,
             success=True,
@@ -473,7 +481,7 @@ class TestQueryHistoryEntry:
         history = QueryHistory(
             database_name="test_db",
             sql_text="SELECT * FROM invalid",
-            executed_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            executed_at=datetime.now(UTC).replace(tzinfo=None),
             execution_time_ms=5,
             row_count=None,
             success=False,

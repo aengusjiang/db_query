@@ -1,30 +1,57 @@
 """Query execution API endpoints."""
 
 import json
-from fastapi import APIRouter, Depends, HTTPException, status
+
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlmodel import Session, select
-from typing import List
+
 from app.database import get_session
 from app.models.database import DatabaseConnection
-from app.models.query import QuerySource
+from app.models.query import QueryHistory, QuerySource
 from app.models.schemas import (
+    ExportRequest,
+    GeneratedSqlResponse,
+    NaturalLanguageInput,
+    QueryHistoryEntry,
     QueryInput,
     QueryResult,
-    QueryHistoryEntry,
-    NaturalLanguageInput,
-    GeneratedSqlResponse,
 )
-from app.services.query_wrapper import execute_query_with_service
-from app.services.query import get_query_history
-from app.services.sql_validator import SqlValidationError
-from app.services.nl2sql import nl2sql_service
+from app.services.exporter import build_export_filename, result_to_csv, result_to_json
 from app.services.metadata import get_cached_metadata
+from app.services.nl2sql import nl2sql_service
+from app.services.query import get_query_history
+from app.services.query_wrapper import execute_query_with_service
+from app.services.sql_validator import SqlValidationError
 
 router = APIRouter(prefix="/api/v1/dbs", tags=["queries"])
 
 
-def to_history_entry(history) -> QueryHistoryEntry:
+def _get_connection_or_404(session: Session, name: str) -> DatabaseConnection:
+    """Look up a database connection or raise 404.
+
+    Args:
+        session: Database session
+        name: Database connection name
+
+    Returns:
+        The matching DatabaseConnection
+
+    Raises:
+        HTTPException: 404 if the connection does not exist
+    """
+    statement = select(DatabaseConnection).where(DatabaseConnection.name == name)
+    connection = session.exec(statement).first()
+    if not connection:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Database connection '{name}' not found",
+        )
+    return connection
+
+
+def to_history_entry(history: QueryHistory) -> QueryHistoryEntry:
     """Convert QueryHistory to QueryHistoryEntry schema."""
+    assert history.id is not None  # persisted rows always have an id
     return QueryHistoryEntry(
         id=history.id,
         databaseName=history.database_name,
@@ -55,17 +82,7 @@ async def execute_sql_query(
     Returns:
         Query result with columns and rows
     """
-    # Get connection
-    statement = select(DatabaseConnection).where(
-        DatabaseConnection.name == name
-    )
-    connection = session.exec(statement).first()
-
-    if not connection:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Database connection '{name}' not found",
-        )
+    connection = _get_connection_or_404(session, name)
 
     # Execute query
     try:
@@ -90,12 +107,78 @@ async def execute_sql_query(
         )
 
 
-@router.get("/{name}/history", response_model=List[QueryHistoryEntry])
+@router.post("/{name}/export")
+async def export_query_result(
+    name: str,
+    input_data: ExportRequest,
+    session: Session = Depends(get_session),
+) -> Response:
+    """
+    Execute a query and return the result as a downloadable CSV/JSON file.
+
+    Reuses the standard query pipeline (SELECT-only validation, auto LIMIT,
+    query history), so an export also shows up in the connection's history.
+
+    Args:
+        name: Database connection name
+        input_data: Export input with SQL and target format
+        session: Database session
+
+    Returns:
+        File response with Content-Disposition attachment header
+
+    Raises:
+        HTTPException: 404 if connection not found, 400 on invalid SQL,
+            500 on execution failure (422 on invalid format via Pydantic)
+    """
+    connection = _get_connection_or_404(session, name)
+
+    # Execute query through the standard pipeline
+    try:
+        result = await execute_query_with_service(
+            session,
+            name,
+            connection.db_type,
+            connection.url,
+            input_data.sql,
+            QuerySource.MANUAL,
+        )
+    except SqlValidationError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Query execution failed: {str(e)}",
+        )
+
+    # Format and return as a downloadable file
+    if input_data.format == "csv":
+        body = result_to_csv(result)
+        media_type = "text/csv"
+    else:
+        body = result_to_json(result)
+        media_type = "application/json"
+
+    filename = build_export_filename(name, input_data.format)
+    return Response(
+        content=body,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Row-Count": str(result.row_count),
+        },
+    )
+
+
+@router.get("/{name}/history", response_model=list[QueryHistoryEntry])
 async def get_query_history_for_database(
     name: str,
     limit: int = 50,
     session: Session = Depends(get_session),
-) -> List[QueryHistoryEntry]:
+) -> list[QueryHistoryEntry]:
     """
     Get query history for a database.
 
@@ -107,17 +190,7 @@ async def get_query_history_for_database(
     Returns:
         List of query history entries
     """
-    # Verify connection exists
-    statement = select(DatabaseConnection).where(
-        DatabaseConnection.name == name
-    )
-    connection = session.exec(statement).first()
-
-    if not connection:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Database connection '{name}' not found",
-        )
+    _get_connection_or_404(session, name)
 
     # Get history
     history_list = await get_query_history(session, name, limit)
@@ -141,15 +214,7 @@ async def natural_language_to_sql(
     Returns:
         Generated SQL query with explanation
     """
-    # Get connection
-    statement = select(DatabaseConnection).where(DatabaseConnection.name == name)
-    connection = session.exec(statement).first()
-
-    if not connection:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Database connection '{name}' not found",
-        )
+    connection = _get_connection_or_404(session, name)
 
     # Get metadata for context
     try:

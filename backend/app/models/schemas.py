@@ -1,9 +1,9 @@
 """API request/response schemas with camelCase aliases."""
 
-from pydantic import BaseModel, Field
-from typing import Literal, Any
 from datetime import datetime
-from app.models.query import QuerySource
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field
 
 
 # Database Connection Schemas
@@ -11,7 +11,12 @@ class DatabaseConnectionInput(BaseModel):
     """Input schema for creating/updating database connection."""
 
     url: str = Field(..., description="Database connection URL (PostgreSQL or MySQL)")
-    db_type: str | None = Field(default=None, alias="dbType", description="Database type (postgresql or mysql). Auto-detected from URL if not provided.")
+    db_type: str | None = Field(
+        default=None,
+        alias="dbType",
+        description="Database type (postgresql or mysql). "
+        "Auto-detected from URL if not provided.",
+    )
     description: str | None = Field(default=None, max_length=200)
 
 
@@ -97,6 +102,13 @@ class QueryHistoryEntry(BaseModel):
     success: bool
     error_message: str | None = Field(None, alias="errorMessage")
     query_source: str = Field(..., alias="querySource")
+
+
+class ExportRequest(BaseModel):
+    """Input schema for exporting query results as a downloadable file."""
+
+    sql: str = Field(..., min_length=1, description="SQL SELECT query to execute")
+    format: Literal["csv", "json"] = Field(..., description="Export file format")
 
 
 # Natural Language Schemas
